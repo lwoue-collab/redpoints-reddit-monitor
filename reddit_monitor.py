@@ -177,6 +177,7 @@ def fetch_omnia_prompts() -> list[dict]:
                 # Enrich each prompt with its parent topic ID
                 for p in batch:
                     p["topicId"] = topic_id
+                  log.info(f"  Prompt fields: {list(p.keys())}")
                 prompts.extend(batch)
                 total = data.get("pagination", {}).get("totalItems", 0)
                 if page * 100 >= total or not batch:
@@ -737,6 +738,7 @@ body{{font-family:'DM Sans',sans-serif;background:#f8fafc;color:#1e293b}}
     <button class="fpill" onclick="filter('bofu',this)">BOFU</button>
     <button class="fpill" onclick="filter('mofu',this)">MOFU</button>
     <button class="fpill" onclick="filter('tofu',this)">TOFU</button>
+    <button class="fpill" onclick="sortByCitations(this)">Most cited first</button>
     <button class="fpill" onclick="filter('actioned',this)">Actioned</button>
   </div>
 
@@ -776,6 +778,19 @@ function filter(type, btn) {{
     else if (type === 'mofu') show = funnelType === 'mofu';
     else if (type === 'tofu') show = funnelType === 'tofu';
     card.style.display = show ? '' : 'none';
+  }});
+}}
+function sortByCitations(btn) {{
+  document.querySelectorAll('.fpill').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const lists = document.querySelectorAll('.thread-list');
+  lists.forEach(list => {{
+    const cards = Array.from(list.querySelectorAll('.thread-card'));
+    cards.sort((a, b) => {{
+      const getCitations = el => parseInt(el.querySelector('.card-meta')?.textContent || '0');
+      return getCitations(b) - getCitations(a);
+    }});
+    cards.forEach(card => list.appendChild(card));
   }});
 }}
 </script>
