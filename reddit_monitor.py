@@ -8,9 +8,11 @@ Weekly script that:
   4. Tags each thread TOFU / MOFU / BOFU from the citing prompt
   5. Flags competitive gaps (competitor cited, RP absent)
   6. Generates a suggested commenting angle via Claude API
-  7. Checks Google Sheet for already-actioned threads
+  7. Checks Slack Canvas action log for already-actioned threads
   8. Builds a filterable HTML dashboard (GitHub Pages)
   9. Sends a weekly Slack alert to the team group DM
+
+Canvas action log: https://red-points.slack.com/docs/T071J43AM/F0B1EAQ99U6
 
 Run: python reddit_monitor.py
 Deploy: GitHub Actions (see .github/workflows/reddit_monitor.yml)
@@ -34,17 +36,16 @@ log = logging.getLogger(__name__)
 # CONFIG
 # ---------------------------------------------------------------------------
 
-OMNIA_TOKEN      = os.getenv("OMNIA_TOKEN")
-OMNIA_BRAND_ID   = os.getenv("OMNIA_BRAND_ID", "03adaaca-5265-404e-b4b1-bbaea0ce73f9")
+OMNIA_TOKEN       = os.getenv("OMNIA_TOKEN")
+OMNIA_BRAND_ID    = os.getenv("OMNIA_BRAND_ID", "03adaaca-5265-404e-b4b1-bbaea0ce73f9")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")   # webhook for the group DM channel
-REPORT_URL        = os.getenv("REPORT_URL", "https://YOUR_GITHUB_USERNAME.github.io/redpoints-reddit-monitor")
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")    # webhook for the group DM channel
+SLACK_BOT_TOKEN   = os.getenv("SLACK_BOT_TOKEN")      # xoxb- token, needs canvases:read scope
+REPORT_URL        = os.getenv("REPORT_URL", "https://lwoue-collab.github.io/redpoints-reddit-monitor")
 
-# Google Sheet — actioned threads log
-# Sheet must have columns: thread_url | actioned_by | date_actioned | notes
-GSHEET_ID         = os.getenv("GSHEET_ID")           # the long ID from the Sheet URL
-GSHEET_TAB        = os.getenv("GSHEET_TAB", "Actioned Threads")
-GSHEET_API_KEY    = os.getenv("GSHEET_API_KEY")       # Google Sheets read API key (no OAuth needed for read)
+# Slack Canvas — actioned threads log
+# Canvas: Reddit Thread Action Log (shared in the team group DM)
+SLACK_CANVAS_ID   = "F0B1EAQ99U6"
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -52,8 +53,9 @@ DATA_DIR.mkdir(exist_ok=True)
 # Competitors to flag when present in a thread (without Red Points)
 COMPETITORS = [
     "brandshield", "corsearch", "marqvision", "convey iq",
-    "ip-watch", "red points", "redpoints",   # include RP so we can detect RP presence
-    "clarivate", "incopro", "unifiedpatents",
+    "ip-watch", "clarivate", "incopro", "unifiedpatents",
+    "netcraft", "zerofox", "bolster", "opsec", "bustem",
+    "red points", "redpoints",   # include RP so we can detect RP presence
 ]
 RP_NAMES = {"red points", "redpoints"}
 
@@ -312,28 +314,48 @@ def identify_new_threads(
 
 def fetch_actioned_urls() -> set[str]:
     """
-    Reads the Google Sheet action log and returns a set of actioned thread URLs.
-    Uses the public Sheets API (read-only, API key auth).
+    Reads the Slack Canvas action log and returns a set of actioned thread URLs.
+    Canvas: Reddit Thread Action Log (F0B1EAQ99U6) shared in the team group DM.
+    Requires SLACK_BOT_TOKEN with canvases:read scope.
     """
-    if not GSHEET_ID or not GSHEET_API_KEY:
-        log.warning("GSHEET_ID or GSHEET_API_KEY not set — skipping actioned check")
+    if not SLACK_BOT_TOKEN:
+        log.warning("SLACK_BOT_TOKEN not set — skipping actioned check")
         return set()
 
     try:
-        tab = GSHEET_TAB.replace(" ", "%20")
-        url = (
-            f"https://sheets.googleapis.com/v4/spreadsheets/{GSHEET_ID}"
-            f"/values/{tab}!A:A?key={GSHEET_API_KEY}"
+        resp = requests.post(
+            "https://slack.com/api/canvases.sections.lookup",
+            headers={
+                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "canvas_id": SLACK_CANVAS_ID,
+                "criteria": {"section_types": ["any_ordered_list", "table"]},
+            },
+            timeout=15,
         )
-        resp = requests.get(url, timeout=15)
         resp.raise_for_status()
-        values = resp.json().get("values", [])
-        # First row is header — skip it
-        urls = {row[0].strip() for row in values[1:] if row and row[0].strip()}
-        log.info(f"Google Sheet: {len(urls)} actioned URLs loaded")
+        data = resp.json()
+
+        if not data.get("ok"):
+            log.warning(f"Slack Canvas API returned error: {data.get('error', 'unknown')}")
+            return set()
+
+        urls = set()
+        for section in data.get("sections", []):
+            content = section.get("content", "")
+            for line in content.split("\n"):
+                if "reddit.com" in line:
+                    match = re.search(r'https://(?:www\.)?reddit\.com/r/[^\s|>]+', line)
+                    if match:
+                        urls.add(match.group(0).rstrip("/").strip())
+
+        log.info(f"Slack Canvas: {len(urls)} actioned URLs loaded")
         return urls
+
     except Exception as e:
-        log.error(f"Google Sheet fetch failed: {e}")
+        log.error(f"Slack Canvas read failed: {e}")
         return set()
 
 
@@ -690,7 +712,7 @@ body{{font-family:'DM Sans',sans-serif;background:#f8fafc;color:#1e293b}}
   </div>
 </div>
 
-<div class="toast" id="toast">URL copied — paste into the Google Sheet action log</div>
+<div class="toast" id="toast">URL copied — paste into the Slack Canvas action log</div>
 
 <script>
 function copyUrl(url) {{
@@ -756,7 +778,7 @@ def main():
     # ── Step 3: Net-new detection ─────────────────────────────────────────────
     threads = identify_new_threads(threads, history)
 
-    # ── Step 4: Fetch actioned URLs from Google Sheet ─────────────────────────
+    # ── Step 4: Fetch actioned URLs from Slack Canvas ────────────────────────
     actioned_urls = fetch_actioned_urls()
 
     # ── Step 5: Competitive gap detection + priority scoring ──────────────────
